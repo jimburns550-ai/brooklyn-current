@@ -37,6 +37,11 @@ In the repo: Settings > Secrets and variables > Actions > New repository secret.
 
 The workflow at `.github/workflows/update-playlist.yml` runs every Monday at 13:00 UTC (and can be triggered manually from the Actions tab) and calls `update_playlist.py`.
 
-## Still needed
+## How the weekly update works
 
-`update_playlist.py` — the script that actually finds up-and-coming artist releases and updates the playlist tracks — isn't built yet. `get_refresh_token.py` only handles auth + playlist creation.
+`update_playlist.py` runs in two phases:
+
+1. **Find releases** — scans the RSS feeds of BrooklynVegan, Stereogum, and Bandcamp Daily for release-announcement posts, parsing each into a candidate artist name + track title.
+2. **Match and add** — looks each release up on Spotify with an exact track+artist search, and adds any match to the top of the playlist. Tracks fall off the bottom once the playlist exceeds 100 (`PLAYLIST_CAP`).
+
+No follower-count filtering is applied — Spotify removed the `followers`/`popularity` fields from the Artist object in its February 2026 API changes, so "up-and-coming" is defined entirely by blog curation rather than audience size.

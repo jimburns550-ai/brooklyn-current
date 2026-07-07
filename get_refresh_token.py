@@ -31,7 +31,7 @@ from dotenv import set_key, load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-SCOPE = "playlist-modify-public playlist-modify-private playlist-read-private"
+SCOPE = "playlist-modify-public playlist-modify-private playlist-read-private user-follow-read"
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 
