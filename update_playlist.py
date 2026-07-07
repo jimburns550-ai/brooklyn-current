@@ -1,32 +1,26 @@
 """
 Weekly refresh for the Brooklyn Current playlist.
 
-Two phases:
-  1. find_new_releases() scans BrooklynVegan, Stereogum, and Bandcamp
-     Daily's RSS feeds for release-announcement posts and parses each
-     into a (candidate artist names, track title) pair. No Spotify
-     calls happen here.
-  2. find_track_uri() looks each release up on Spotify by exact
-     track+artist search and, if found, the track is added to the top
-     of the playlist. Older tracks are trimmed off the bottom once the
-     playlist exceeds PLAYLIST_CAP tracks.
+Tracks a curated roster of Brooklyn-scene artists (see artists.txt,
+edit it any time to add/remove names) rather than discovering artists
+from national music blogs - those cover famous acts almost by
+definition, not the local scene. For each tracked artist, checks
+Spotify for anything released in the last LOOKBACK_DAYS days (capped
+at MAX_TRACKS_PER_ARTIST tracks, so one prolific artist can't crowd
+out the rest of the roster) and adds matches to the top of the
+playlist. Older tracks are trimmed off the bottom once the playlist
+exceeds PLAYLIST_CAP tracks.
 
 Runs non-interactively using a refresh token (see get_refresh_token.py
 for one-time setup). Required env vars: SPOTIFY_CLIENT_ID,
 SPOTIFY_CLIENT_SECRET, SPOTIFY_REFRESH_TOKEN, SPOTIFY_PLAYLIST_ID.
 """
 
-import html
 import os
-import re
-import ssl
 import sys
 import unicodedata
-import urllib.request
-import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 
-import certifi
 import spotipy
 from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyOAuth
@@ -34,25 +28,10 @@ from spotipy.oauth2 import SpotifyOAuth
 SCOPE = "playlist-modify-public playlist-modify-private playlist-read-private user-follow-read"
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", 7))
 PLAYLIST_CAP = int(os.environ.get("PLAYLIST_CAP", 100))
+MAX_TRACKS_PER_ARTIST = int(os.environ.get("MAX_TRACKS_PER_ARTIST", 2))
 ADD_BATCH_SIZE = 100
 
-FEEDS = [
-    "https://www.brooklynvegan.com/feed/",
-    "https://www.stereogum.com/category/music/feed/",
-    "https://daily.bandcamp.com/feed",
-]
-
-QUOTE_CAPTURE_RE = re.compile(r'["“]([^"”]+)["”]')
-# Bandcamp Daily's format: 'Artist(s), "Track Title"'
-COMMA_QUOTE_RE = re.compile(r'^(.+?),\s*["“]')
-# Stereogum's dominant format: 'Artist Name – "Track Title"'
-DASH_RE = re.compile(r"^(.+?)\s+[–—]\s+")
-# BrooklynVegan-style release posts: 'Artist Name announce/share ... "Track"'
-RELEASE_VERB_RE = re.compile(
-    r"^(.+?)\s+(?:announces?|shares?|releas\w*|drops?|unveils?|premieres?)\b",
-    re.IGNORECASE,
-)
-SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+ARTISTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artists.txt")
 
 
 def get_client() -> spotipy.Spotify:
@@ -71,56 +50,10 @@ def get_client() -> spotipy.Spotify:
     return spotipy.Spotify(auth=token_info["access_token"], retries=0)
 
 
-def fetch_feed_titles(url: str) -> list[str]:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15, context=SSL_CONTEXT) as resp:
-        root = ET.fromstring(resp.read())
-    return [item.findtext("title", "") for item in root.iter("item")]
-
-
-def extract_release(raw_title: str) -> tuple[list[str], str] | None:
-    """Parse a blog post title into (candidate artist names, track title).
-
-    Requires a quoted segment (the track/song title) to be present at
-    all - this alone filters out most tour announcements, recaps, and
-    roundup posts that aren't about a specific new release.
-    """
-    title = html.unescape(raw_title)
-
-    quote_match = QUOTE_CAPTURE_RE.search(title)
-    if not quote_match:
-        return None
-    track_title = quote_match.group(1).strip().rstrip(",.:")
-
-    match = COMMA_QUOTE_RE.match(title) or DASH_RE.match(title) or RELEASE_VERB_RE.match(title)
-    if not match:
-        return None
-
-    artist_part = match.group(1).strip()
-    artists = [
-        part.strip()
-        for part in re.split(r"\s*&\s*|,\s*", artist_part)
-        if part.strip() and part.strip().lower() != "various artists"
-    ]
-    if not artists:
-        return None
-    return artists, track_title
-
-
-def find_new_releases() -> list[tuple[list[str], str]]:
-    """Scan the blog feeds and return (candidate artists, track title) pairs.
-
-    Pure blog-scraping step - no Spotify calls here at all.
-    """
-    releases = []
-    seen = set()
-    for feed_url in FEEDS:
-        for title in fetch_feed_titles(feed_url):
-            release = extract_release(title)
-            if release and (key := (tuple(release[0]), release[1])) not in seen:
-                seen.add(key)
-                releases.append(release)
-    return releases
+def load_tracked_artists() -> list[str]:
+    with open(ARTISTS_FILE) as f:
+        lines = [line.strip() for line in f]
+    return [line for line in lines if line and not line.startswith("#")]
 
 
 def normalize_name(name: str) -> str:
@@ -134,30 +67,44 @@ def released_recently(release_date: str, precision: str, cutoff: date) -> bool:
     return datetime.strptime(release_date, "%Y-%m-%d").date() >= cutoff
 
 
-def find_track_uri(sp: spotipy.Spotify, artists: list[str], track_title: str, cutoff: date) -> str | None:
-    """Look up a specific blog-mentioned release on Spotify.
+def get_new_tracks_for_artist(sp: spotipy.Spotify, name: str, cutoff: date) -> list[str]:
+    # As of the Feb 2026 API changes this endpoint caps limit at 10.
+    today = date.today()
+    year_filter = str(cutoff.year) if cutoff.year == today.year else f"{cutoff.year}-{today.year}"
+    query = f'artist:"{name}" year:{year_filter}'
 
-    Tries each candidate artist name (a post can credit multiple
-    collaborators) until one produces an exact track+artist match whose
-    release date is plausibly recent - a sanity check against search
-    matching an older reissue or an unrelated same-titled track.
-    """
-    for name in artists:
+    # (release_date, track) pairs - deduped by normalized title so
+    # reissues/alternate versions of the same song don't each count as
+    # a separate track, then capped to MAX_TRACKS_PER_ARTIST so one
+    # prolific artist can't flood the playlist and crowd out others.
+    candidates = {}
+    offset = 0
+    while True:
         try:
-            results = sp.search(q=f'track:"{track_title}" artist:"{name}"', type="track", limit=5)
+            results = sp.search(q=query, type="track", limit=10, offset=offset)
         except spotipy.SpotifyException as e:
             if e.http_status == 429:
-                print(f"  rate-limited searching for {name!r} - {track_title!r}, skipping")
-                return None
+                print(f"  rate-limited searching for {name!r}, skipping for this run")
+                break
             raise
 
-        for track in results["tracks"]["items"]:
+        tracks = results["tracks"]["items"]
+        for track in tracks:
             if not any(normalize_name(a["name"]) == normalize_name(name) for a in track["artists"]):
                 continue
             album = track["album"]
-            if released_recently(album["release_date"], album["release_date_precision"], cutoff):
-                return track["uri"]
-    return None
+            if not released_recently(album["release_date"], album["release_date_precision"], cutoff):
+                continue
+            key = normalize_name(track["name"])
+            if key not in candidates or album["release_date"] > candidates[key][0]:
+                candidates[key] = (album["release_date"], track["uri"])
+
+        if not results["tracks"].get("next") or len(tracks) < 10:
+            break
+        offset += 10
+
+    ranked = sorted(candidates.values(), key=lambda pair: pair[0], reverse=True)
+    return [uri for _, uri in ranked[:MAX_TRACKS_PER_ARTIST]]
 
 
 def get_existing_track_uris(sp: spotipy.Spotify, playlist_id: str) -> set[str]:
@@ -213,17 +160,17 @@ def main():
     sp = get_client()
 
     cutoff = date.today() - timedelta(days=LOOKBACK_DAYS)
-    releases = find_new_releases()
-    print(f"Parsed {len(releases)} candidate release(s) from blog feeds.")
+    artists = load_tracked_artists()
+    print(f"Checking {len(artists)} tracked artist(s) for new releases.")
 
     new_tracks = []
     seen = set()
-    for artists, track_title in releases:
-        uri = find_track_uri(sp, artists, track_title, cutoff)
-        if uri and uri not in seen:
-            seen.add(uri)
-            new_tracks.append(uri)
-    print(f"Matched {len(new_tracks)} release(s) to a Spotify track.")
+    for name in artists:
+        for uri in get_new_tracks_for_artist(sp, name, cutoff):
+            if uri not in seen:
+                seen.add(uri)
+                new_tracks.append(uri)
+    print(f"Found {len(new_tracks)} new track(s).")
 
     if not new_tracks:
         print("No qualifying new releases this week.")

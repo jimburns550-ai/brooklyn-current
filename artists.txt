@@ -1,0 +1,30 @@
+# Brooklyn Current tracked artist roster
+# One artist name per line. Lines starting with # are ignored.
+# Add/remove names any time - update_playlist.py checks this file each run.
+
+# Neo-soul / alt-R&B
+Devin Tracy
+Duendita
+KeiyaA
+Nali
+Adrian Daniel
+Avangelia Reid
+3ee
+
+# Experimental / abstract hip-hop (Brooklyn sLUms + Grip scene)
+Standing On The Corner
+Slauson Malone
+MIKE
+Medhane
+Navy Blue
+Adé Hakim
+King Carter
+Maassai
+AKAI SOLO
+phiik
+Fatboi Sharif
+Nappy Nina
+JWords
+
+# Jazz-adjacent
+Kassa Overall
